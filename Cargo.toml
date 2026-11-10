@@ -1,0 +1,24 @@
+[package]
+name = "rojo"
+description = "Rojo for Flareite: serving, building, and sourcemaps for Roblox projects, with Rokit and Wally."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The editor's repository, checked out beside this one.
+flareite-extension-api = { path = "../editor/crates/flareite-extension-api" }
+# Reading project files, sourcemaps, and Roblox's API dump, and writing the
+# schemas made from it.
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

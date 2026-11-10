@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Wally package manifest",
+  "description": "A Wally package: what it is, and the packages it depends on.",
+  "type": "object",
+  "required": ["package"],
+  "additionalProperties": false,
+  "definitions": {
+    "dependencies": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^([A-Za-z0-9_-]+:)?[a-z0-9_-]+/[a-z0-9_-]+@\\S+$",
+        "description": "`scope/name@version`, such as `roblox/roact@^1.4.4`. A version requirement: `^1.2.3` (the default meaning), `=1.2.3`, `>=1.2, <2`.",
+        "examples": ["sleitnick/knit@^1.7.0", "evaera/promise@^4.0.0", "roblox/roact@^1.4.4"]
+      }
+    }
+  },
+  "properties": {
+    "package": {
+      "type": "object",
+      "required": ["name", "version", "registry", "realm"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9_-]+/[a-z0-9_-]+$",
+          "description": "`scope/name`, in lowercase: the scope is the publisher's."
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$",
+          "description": "The package's version, `major.minor.patch` (semantic versioning)."
+        },
+        "registry": {
+          "type": "string",
+          "description": "The index packages are found in.",
+          "default": "https://github.com/UpliftGames/wally-index"
+        },
+        "realm": {
+          "enum": ["shared", "server", "dev"],
+          "enumDescriptions": [
+            "Runs on the server and clients: installed in Packages.",
+            "Runs only on the server: installed in ServerPackages.",
+            "Only for development, such as tests: installed in DevPackages."
+          ],
+          "description": "Where the package runs."
+        },
+        "description": { "type": "string" },
+        "license": { "type": "string", "description": "An SPDX license expression, such as `MIT`." },
+        "authors": { "type": "array", "items": { "type": "string" } },
+        "homepage": { "type": "string" },
+        "repository": { "type": "string" },
+        "include": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Files published with the package (globs); everything by default."
+        },
+        "exclude": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Files left out of the published package (globs)."
+        },
+        "private": {
+          "type": "boolean",
+          "description": "Keeps `wally publish` from publishing it."
+        }
+      }
+    },
+    "place": {
+      "type": "object",
+      "description": "For a game: where Wally's packages are in it, so packages that depend on each other find them.",
+      "additionalProperties": false,
+      "properties": {
+        "shared-packages": {
+          "type": "string",
+          "description": "The instance shared packages are in, such as `game.ReplicatedStorage.Packages`."
+        },
+        "server-packages": {
+          "type": "string",
+          "description": "The instance server packages are in, such as `game.ServerScriptService.Packages`."
+        }
+      }
+    },
+    "dependencies": {
+      "$ref": "#/definitions/dependencies",
+      "description": "Packages for the server and clients, installed in Packages."
+    },
+    "server-dependencies": {
+      "$ref": "#/definitions/dependencies",
+      "description": "Packages only the server uses, installed in ServerPackages."
+    },
+    "dev-dependencies": {
+      "$ref": "#/definitions/dependencies",
+      "description": "Packages for development, such as test frameworks, installed in DevPackages."
+    }
+  }
+}

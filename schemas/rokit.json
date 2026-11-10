@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Rokit project tools",
+  "description": "The tools Rokit installs for this project, and the versions it runs here.",
+  "type": "object",
+  "properties": {
+    "tools": {
+      "type": "object",
+      "description": "Tools, by the name they're run as: `name = \"owner/repository@version\"`, a GitHub repository whose releases have the tool.",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[^\\s@]+$",
+        "description": "`owner/repository@version`, such as `rojo-rbx/rojo@7.4.4`.",
+        "examples": [
+          "rojo-rbx/rojo@7.4.4",
+          "UpliftGames/wally@0.3.2",
+          "JohnnyMorganz/StyLua@2.0.2",
+          "Kampfkarren/selene@0.28.0",
+          "JohnnyMorganz/luau-lsp@1.40.0",
+          "JohnnyMorganz/wally-package-types@1.3.2"
+        ]
+      }
+    }
+  }
+}

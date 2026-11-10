@@ -1,0 +1,338 @@
+# Rojo: serving Roblox projects to Studio, building them, and keeping the
+# sourcemap luau-lsp reads; the project's instances in a view and the
+# explorer; schemas for project, meta, and model files made from Roblox's
+# API; and Rokit and Wally. See Flareite's docs/extensions.md.
+id = "flareite.rojo"
+name = "Rojo"
+version = "0.1.0"
+description = "Roblox projects with Rojo: serve to Studio, build, sourcemaps, the instance tree, checked project files, and Rokit and Wally."
+author = "Flareite"
+icon = "icon.svg"
+api_version = "1"
+entrypoint = "target/wasm32-unknown-unknown/release/rojo.wasm"
+# In Rojo projects, and folders with Rokit or Wally tools.
+activation = [
+  "on-folder-contains:*.project.json",
+  "on-folder-contains:rokit.toml",
+  "on-folder-contains:wally.toml",
+  "on-view:projects",
+  "on-view:instances",
+]
+on_folder_changed = "flareite.rojo.folderChanged"
+on_configuration_changed = "flareite.rojo.configure"
+
+[engines]
+flareite = ">=0.1.0"
+
+# files_read: project files, sourcemap.json, rokit.toml, and wally.toml, and
+# watching them. processes: Rojo, Rokit, Wally, and wally-package-types;
+# and opening a built place in Roblox Studio. network: Roblox's API, for
+# checking project files.
+[permissions]
+files_read = true
+processes = true
+network = true
+
+[build]
+command = "cargo"
+args = ["build", "--release"]
+watch = ["src", "Cargo.toml"]
+
+# Installed with Rokit (rokit add rojo-rbx/rojo), or from their releases.
+[[programs]]
+name = "rojo"
+
+[[programs]]
+name = "rokit"
+
+[[programs]]
+name = "wally"
+
+[[programs]]
+name = "wally-package-types"
+
+[[status_items]]
+id = "serve"
+alignment = "left"
+priority = 50
+text = "Rojo"
+tooltip = "Serve a Rojo project to Roblox Studio"
+command = "flareite.rojo.toggleServe"
+
+[[view_containers]]
+id = "rojo"
+title = "Rojo"
+icon = "cube"
+
+[[views]]
+id = "projects"
+title = "Projects"
+container = "rojo"
+
+[[views]]
+id = "instances"
+title = "Instances"
+container = "rojo"
+
+# Projects: serve, stop, and build on the rows; more in their menus.
+[[menus]]
+location = "view/item"
+view = "projects"
+contexts = ["project"]
+command = "flareite.rojo.serve"
+inline = true
+icon = "play"
+
+[[menus]]
+location = "view/item"
+view = "projects"
+contexts = ["serving"]
+command = "flareite.rojo.stop"
+inline = true
+icon = "stop"
+
+[[menus]]
+location = "view/item"
+view = "projects"
+command = "flareite.rojo.build"
+inline = true
+icon = "download"
+
+[[menus]]
+location = "view/item"
+view = "projects"
+command = "flareite.rojo.buildAndOpen"
+
+[[menus]]
+location = "view/item"
+view = "projects"
+command = "flareite.rojo.upload"
+
+[[menus]]
+location = "view/item"
+view = "projects"
+command = "flareite.rojo.syncback"
+
+[[menus]]
+location = "view/item"
+view = "projects"
+command = "flareite.rojo.formatProject"
+
+[[menus]]
+location = "view/item"
+view = "projects"
+command = "flareite.rojo.openProject"
+
+[[menus]]
+location = "view/title"
+view = "projects"
+command = "flareite.rojo.newProject"
+inline = true
+icon = "add"
+
+[[menus]]
+location = "view/title"
+view = "projects"
+command = "flareite.rojo.refresh"
+inline = true
+icon = "refresh"
+
+[[menus]]
+location = "view/title"
+view = "projects"
+command = "flareite.rojo.installPlugin"
+group = "1_rojo"
+
+[[menus]]
+location = "view/title"
+view = "projects"
+command = "flareite.rojo.installRojo"
+group = "1_rojo"
+
+[[menus]]
+location = "view/title"
+view = "projects"
+command = "flareite.rojo.regenerateSourcemap"
+group = "1_rojo"
+
+[[menus]]
+location = "view/title"
+view = "projects"
+command = "flareite.rojo.installTools"
+group = "2_tools"
+
+[[menus]]
+location = "view/title"
+view = "projects"
+command = "flareite.rojo.installPackages"
+group = "2_tools"
+
+[[menus]]
+location = "view/title"
+view = "projects"
+command = "flareite.rojo.forgetApiKey"
+group = "3_upload"
+
+[[menus]]
+location = "view/title"
+view = "instances"
+command = "flareite.rojo.regenerateSourcemap"
+inline = true
+icon = "refresh"
+
+[[commands]]
+id = "flareite.rojo.serve"
+title = "Serve Project"
+
+[[commands]]
+id = "flareite.rojo.stop"
+title = "Stop Serving"
+
+[[commands]]
+id = "flareite.rojo.toggleServe"
+title = "Serve or Stop"
+hidden = true
+
+[[commands]]
+id = "flareite.rojo.build"
+title = "Build Project"
+
+[[commands]]
+id = "flareite.rojo.buildAndOpen"
+title = "Build and Open in Roblox Studio"
+
+[[commands]]
+id = "flareite.rojo.upload"
+title = "Upload Project to Roblox"
+
+[[commands]]
+id = "flareite.rojo.syncback"
+title = "Syncback from a Place File"
+
+[[commands]]
+id = "flareite.rojo.formatProject"
+title = "Format Project File"
+
+[[commands]]
+id = "flareite.rojo.openProject"
+title = "Open Project File"
+
+[[commands]]
+id = "flareite.rojo.newProject"
+title = "New Project"
+
+[[commands]]
+id = "flareite.rojo.refresh"
+title = "Refresh"
+
+[[commands]]
+id = "flareite.rojo.installPlugin"
+title = "Install Roblox Studio Plugin"
+
+[[commands]]
+id = "flareite.rojo.installRojo"
+title = "Install Rojo"
+
+[[commands]]
+id = "flareite.rojo.regenerateSourcemap"
+title = "Regenerate Sourcemap"
+
+[[commands]]
+id = "flareite.rojo.installTools"
+title = "Install Rokit Tools"
+category = "Rokit"
+
+[[commands]]
+id = "flareite.rojo.installPackages"
+title = "Install Wally Packages"
+category = "Wally"
+
+[[commands]]
+id = "flareite.rojo.forgetApiKey"
+title = "Forget Open Cloud API Key"
+
+# Run by Flareite and the commands above.
+[[commands]]
+id = "flareite.rojo.configure"
+title = "Apply Settings"
+hidden = true
+
+[[commands]]
+id = "flareite.rojo.folderChanged"
+title = "Folder Changed"
+hidden = true
+
+[[commands]]
+id = "flareite.rojo.filesChanged"
+title = "Files Changed"
+hidden = true
+
+[[commands]]
+id = "flareite.rojo.openInstance"
+title = "Open Instance"
+hidden = true
+
+[[commands]]
+id = "flareite.rojo.output"
+title = "Program Output"
+hidden = true
+
+[[commands]]
+id = "flareite.rojo.finished"
+title = "Program Finished"
+hidden = true
+
+[[commands]]
+id = "flareite.rojo.answered"
+title = "Answered"
+hidden = true
+
+[[commands]]
+id = "flareite.rojo.downloaded"
+title = "Downloaded"
+hidden = true
+
+[[commands]]
+id = "flareite.rojo.timer"
+title = "Timer"
+hidden = true
+
+[configuration.project]
+type = "string"
+default = "default.project.json"
+description = "The project file, in the open folder, that sourcemaps are made from and that's served when there are several. Without it, the first project file found is used."
+
+[configuration.sourcemap]
+type = "boolean"
+default = true
+description = "Keep sourcemap.json up to date with `rojo sourcemap --watch`, for luau-lsp (the Luau extension) to resolve requires and instances, and for the Instances view and explorer marks."
+
+[configuration.sourcemap_include_non_scripts]
+type = "boolean"
+default = true
+description = "Include instances that aren't scripts (models, folders, values) in the sourcemap, so their paths complete and show in the Instances view."
+
+[configuration.serve_port]
+type = "integer"
+default = 0
+minimum = 0
+maximum = 65535
+description = "The port `rojo serve` listens on; 0 for the project's `servePort`, or 34872."
+
+[configuration.explorer_marks]
+type = "boolean"
+default = true
+description = "Mark files in the explorer with the Roblox instances they become: SS (Script), LS (LocalScript), and MS (ModuleScript), and the class of others in their tooltips."
+
+[configuration.wally_prompt]
+type = "boolean"
+default = true
+description = "When wally.toml changes, offer to run `wally install`."
+
+[[schemas]]
+files = ["rokit.toml"]
+path = "schemas/rokit.json"
+
+[[schemas]]
+files = ["wally.toml"]
+path = "schemas/wally.json"
