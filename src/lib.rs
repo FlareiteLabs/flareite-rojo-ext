@@ -23,30 +23,29 @@ mod tools;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use flareite_extension_api::downloads;
+use flareite_extension_api::downloads::{self, DownloadedFile};
+use flareite_extension_api::events::Event;
 use flareite_extension_api::explorer::{self, FileMark};
-use flareite_extension_api::processes::{self, ProcessError, ProcessOptions, ProcessOutput};
-use flareite_extension_api::prompts::{self, AnswerValue, ConfirmOptions, InputOptions, PickItem};
+use flareite_extension_api::processes::{
+  self, FinishedProcess, ProcessError, ProcessLines, ProcessOptions, ProcessOutput,
+};
+use flareite_extension_api::prompts::{
+  self, AnswerValue, ConfirmOptions, InputOptions, PickItem, PromptAnswer,
+};
 use flareite_extension_api::schemas::{self, Schema, SchemaFormat};
 use flareite_extension_api::storage::{self, StorageScope};
 use flareite_extension_api::types::{
-  Activation, CommandContext, ConfigValue, DocumentChange, DocumentId, DocumentInfo, LogLevel,
-  MessageLevel, StatusItem,
+  Activation, CommandContext, ConfigValue, LogLevel, MessageLevel, StatusItem,
 };
 use flareite_extension_api::views::{self, Welcome, WelcomeButton};
+use flareite_extension_api::workspace::FileChanges;
 use flareite_extension_api::{
-  Guest, export_extension, host, links, secrets, timers, workbench, workspace,
+  Extension, host, links, register, secrets, timers, workbench, workspace,
 };
 
 use crate::projects::{Project, join, relative_to};
 use crate::tools::Tool;
 
-const OUTPUT: &str = "flareite.rojo.output";
-const FINISHED: &str = "flareite.rojo.finished";
-const ANSWERED: &str = "flareite.rojo.answered";
-const DOWNLOADED: &str = "flareite.rojo.downloaded";
-const FILES_CHANGED: &str = "flareite.rojo.filesChanged";
-const TIMER: &str = "flareite.rojo.timer";
 const PROJECTS_VIEW: &str = "projects";
 const INSTANCES_VIEW: &str = "instances";
 const STATUS: &str = "serve";
@@ -279,7 +278,7 @@ fn trusted_folder() -> Result<String, String> {
 
 /// Starts a program, its output going to the log.
 fn spawn(program: &str, args: &[String], folder: &str) -> Result<u64, ProcessError> {
-  processes::spawn_streaming(program, args, &options(folder), FINISHED, OUTPUT)
+  processes::spawn_streaming(program, args, &options(folder))
 }
 
 /// Why a program couldn't run, in words.
@@ -323,7 +322,7 @@ fn refresh_folder() {
     }
     stop_serving();
     if let Some(path) = &path {
-      match workspace::watch(path, FILES_CHANGED) {
+      match workspace::watch(path) {
         Ok(watch) => with_state(|state| state.watch = Some(watch)),
         Err(error) => log(
           LogLevel::Warn,
@@ -752,10 +751,7 @@ fn error_message(line: &str) -> Option<&str> {
 
 // --- Programs' output and ends ---------------------------------------------
 
-fn output() {
-  let Some(lines) = processes::lines() else {
-    return;
-  };
+fn output(lines: ProcessLines) {
   let process = lines.process;
   enum Whose {
     Serve,
@@ -893,10 +889,7 @@ fn why(lines: &[String], outcome: &Result<ProcessOutput, ProcessError>) -> Strin
     })
 }
 
-fn finished() {
-  let Some(finished) = processes::finished() else {
-    return;
-  };
+fn finished(finished: FinishedProcess) {
   let process = finished.process;
   let outcome = finished.outcome;
   let serve = with_state(|state| {
@@ -1086,7 +1079,7 @@ fn task_finished(running: Running, outcome: &Result<ProcessOutput, ProcessError>
     Task::WallyInstall => {
       info("Installed Wally's packages.");
       // Types once the sourcemap has the packages.
-      let timer = timers::set_timer(PACKAGE_TYPES_WAIT_MS, TIMER).ok();
+      let timer = timers::set_timer(PACKAGE_TYPES_WAIT_MS).ok();
       with_state(|state| state.package_types_timer = timer);
     }
     Task::PackageTypes => log(LogLevel::Info, "typed Wally's packages"),
@@ -1115,15 +1108,12 @@ fn ask_confirm(
   destructive: bool,
   pending: Pending,
 ) {
-  let result = prompts::confirm(
-    &ConfirmOptions {
-      message: message.into(),
-      detail,
-      buttons: buttons.iter().map(|b| (*b).to_owned()).collect(),
-      destructive,
-    },
-    ANSWERED,
-  );
+  let result = prompts::confirm(&ConfirmOptions {
+    message: message.into(),
+    detail,
+    buttons: buttons.iter().map(|b| (*b).to_owned()).collect(),
+    destructive,
+  });
   remember(result, pending);
 }
 
@@ -1140,17 +1130,14 @@ fn ask_input(
     placeholder: placeholder.map(str::to_owned),
   };
   let result = if password {
-    prompts::input_password(&options, ANSWERED)
+    prompts::input_password(&options)
   } else {
-    prompts::input(&options, ANSWERED)
+    prompts::input(&options)
   };
   remember(result, pending);
 }
 
-fn answered() -> Result<(), String> {
-  let Some(answer) = prompts::answer() else {
-    return Ok(());
-  };
+fn answered(answer: PromptAnswer) -> Result<(), String> {
   let Some(pending) = with_state(|state| state.pending.remove(&answer.prompt)) else {
     return Ok(());
   };
@@ -1352,8 +1339,8 @@ fn set_project_value(project: &Project, key: &str, value: &str) {
 
 /// The project a command is for: the argument (from the Projects view), the
 /// only one, or the one the user picks.
-fn with_project(action: Action) -> Result<(), String> {
-  if let Some(path) = workbench::command_argument() {
+fn with_project(action: Action, argument: Option<String>) -> Result<(), String> {
+  if let Some(path) = argument {
     let project = with_state(|state| state.projects.iter().find(|p| p.path == path).cloned());
     return match project {
       Some(project) => act(action, project),
@@ -1388,10 +1375,7 @@ fn pick_project(action: Action, projects: &[Project]) -> Result<(), String> {
       value: project.path.clone(),
     })
     .collect();
-  remember(
-    prompts::pick(title, &items, ANSWERED),
-    Pending::Project(action),
-  );
+  remember(prompts::pick(title, &items), Pending::Project(action));
   Ok(())
 }
 
@@ -1456,7 +1440,7 @@ fn act(action: Action, project: Project) -> Result<(), String> {
         value: String::new(),
       });
       remember(
-        prompts::pick("Sync back from which place file?", &items, ANSWERED),
+        prompts::pick("Sync back from which place file?", &items),
         Pending::SyncbackFile { project },
       );
       Ok(())
@@ -1547,7 +1531,7 @@ fn new_project() -> Result<(), String> {
     value: value.into(),
   });
   remember(
-    prompts::pick("What kind of project?", &items, ANSWERED),
+    prompts::pick("What kind of project?", &items),
     Pending::NewProject,
   );
   Ok(())
@@ -1663,10 +1647,7 @@ fn type_packages() {
   }
 }
 
-fn files_changed() {
-  let Some(changes) = workspace::changes() else {
-    return;
-  };
+fn files_changed(changes: FileChanges) {
   let folder = with_state(|state| state.folder.clone());
   let Some(folder) = folder else {
     return;
@@ -1754,8 +1735,8 @@ fn set_schemas(api: &schema::Api) {
 /// which the full ones are made from.
 fn start_schemas() {
   set_schemas(&schema::Api::default());
-  let dump = downloads::download(schema::API_DUMP, DOWNLOADED);
-  let docs = downloads::download(schema::API_DOCS, DOWNLOADED);
+  let dump = downloads::download(schema::API_DUMP);
+  let docs = downloads::download(schema::API_DOCS);
   match (dump, docs) {
     (Ok(dump), Ok(docs)) => with_state(|state| {
       state.dump_request = Some(dump);
@@ -1770,10 +1751,7 @@ fn start_schemas() {
   }
 }
 
-fn downloaded() {
-  let Some(file) = downloads::downloaded() else {
-    return;
-  };
+fn downloaded(file: DownloadedFile) {
   let ready = with_state(|state| {
     if state.dump_request == Some(file.request) {
       match file.outcome {
@@ -1820,16 +1798,18 @@ fn downloaded() {
 
 // --- The extension ---------------------------------------------------------
 
+/// The extension. Its state is in [`STATE`], which the functions above
+/// share.
 struct Rojo;
 
-impl Guest for Rojo {
-  fn activate(_context: Activation) -> Result<(), String> {
+impl Extension for Rojo {
+  fn activate(_: Activation) -> Result<Self, String> {
     refresh_folder();
     start_schemas();
-    Ok(())
+    Ok(Rojo)
   }
 
-  fn deactivate() {
+  fn deactivate(&mut self) {
     with_state(|state| {
       if let Some(serve) = state.serve.take() {
         processes::kill(serve.process);
@@ -1840,24 +1820,25 @@ impl Guest for Rojo {
     });
   }
 
-  fn run_command(command: String, _context: CommandContext) -> Result<(), String> {
+  fn run_command(&mut self, command: &str, context: CommandContext) -> Result<(), String> {
+    let argument = context.argument;
     match command.trim_start_matches("flareite.rojo.") {
-      "serve" => with_project(Action::Serve)?,
+      "serve" => with_project(Action::Serve, argument)?,
       "stop" => stop_serving(),
       "toggleServe" => {
         if with_state(|state| state.serve.is_some()) {
           stop_serving();
         } else {
-          with_project(Action::Serve)?;
+          with_project(Action::Serve, argument)?;
         }
       }
-      "build" => with_project(Action::Build { open: false })?,
-      "buildAndOpen" => with_project(Action::Build { open: true })?,
-      "upload" => with_project(Action::Upload)?,
-      "syncback" => with_project(Action::Syncback)?,
-      "formatProject" => with_project(Action::Format)?,
+      "build" => with_project(Action::Build { open: false }, argument)?,
+      "buildAndOpen" => with_project(Action::Build { open: true }, argument)?,
+      "upload" => with_project(Action::Upload, argument)?,
+      "syncback" => with_project(Action::Syncback, argument)?,
+      "formatProject" => with_project(Action::Format, argument)?,
       "openProject" | "openInstance" => {
-        let path = workbench::command_argument().ok_or("No file was given.")?;
+        let path = argument.ok_or("No file was given.")?;
         workspace::open_file(&path)
           .map_err(|error| format!("{path} couldn't be opened: {error:?}"))?;
       }
@@ -1893,37 +1874,37 @@ impl Guest for Rojo {
         secrets::set(API_KEY, None).map_err(|error| format!("{error:?}"))?;
         info("Forgot the Open Cloud API key: the next upload asks for one.");
       }
-      "configure" => {
-        configure_sourcemap(false);
-        show_instances();
-        show_status();
-      }
-      "folderChanged" => refresh_folder(),
-      "filesChanged" => files_changed(),
-      "output" => output(),
-      "finished" => finished(),
-      "answered" => answered()?,
-      "downloaded" => downloaded(),
-      "timer" => {
-        let fired = timers::fired();
-        let ours = with_state(|state| state.package_types_timer == fired);
-        if ours {
-          type_packages();
-        }
-      }
       _ => return Err(format!("unknown command {command}")),
     }
     Ok(())
   }
 
-  fn document_opened(_document: DocumentInfo) {}
-
-  fn document_changed(_change: DocumentChange) {}
-
-  fn document_closed(_document: DocumentId) {}
+  fn handle_event(&mut self, event: Event) -> Result<(), String> {
+    match event {
+      Event::ConfigurationChanged => {
+        configure_sourcemap(false);
+        show_instances();
+        show_status();
+      }
+      Event::FolderChanged => refresh_folder(),
+      Event::FilesChanged(changes) => files_changed(changes),
+      Event::ProcessOutput(lines) => output(lines),
+      Event::ProcessFinished(process) => finished(process),
+      Event::PromptAnswered(answer) => answered(answer)?,
+      Event::DownloadFinished(file) => downloaded(file),
+      Event::TimerFired(timer) => {
+        let ours = with_state(|state| state.package_types_timer == Some(timer));
+        if ours {
+          type_packages();
+        }
+      }
+      _ => {}
+    }
+    Ok(())
+  }
 }
 
-export_extension!(Rojo);
+register!(Rojo);
 
 #[cfg(test)]
 mod tests {

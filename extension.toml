@@ -4,11 +4,11 @@
 # API; and Rokit and Wally. See Flareite's docs/extensions.md.
 id = "flareite.rojo"
 name = "Rojo"
-version = "0.1.0"
+version = "1.0.0"
 description = "Roblox projects with Rojo: serve to Studio, build, sourcemaps, the instance tree, checked project files, and Rokit and Wally."
 author = "Flareite"
 icon = "icon.svg"
-api_version = "1"
+api_version = "2"
 entrypoint = "target/wasm32-unknown-unknown/release/rojo.wasm"
 # In Rojo projects, and folders with Rokit or Wally tools.
 activation = [
@@ -18,8 +18,8 @@ activation = [
   "on-view:projects",
   "on-view:instances",
 ]
-on_folder_changed = "flareite.rojo.folderChanged"
-on_configuration_changed = "flareite.rojo.configure"
+# Looks at the folder again as it changes, and follows the settings.
+events = ["folder-changed", "configuration-changed"]
 
 [engines]
 flareite = ">=0.1.0"
@@ -253,48 +253,8 @@ title = "Forget Open Cloud API Key"
 
 # Run by Flareite and the commands above.
 [[commands]]
-id = "flareite.rojo.configure"
-title = "Apply Settings"
-hidden = true
-
-[[commands]]
-id = "flareite.rojo.folderChanged"
-title = "Folder Changed"
-hidden = true
-
-[[commands]]
-id = "flareite.rojo.filesChanged"
-title = "Files Changed"
-hidden = true
-
-[[commands]]
 id = "flareite.rojo.openInstance"
 title = "Open Instance"
-hidden = true
-
-[[commands]]
-id = "flareite.rojo.output"
-title = "Program Output"
-hidden = true
-
-[[commands]]
-id = "flareite.rojo.finished"
-title = "Program Finished"
-hidden = true
-
-[[commands]]
-id = "flareite.rojo.answered"
-title = "Answered"
-hidden = true
-
-[[commands]]
-id = "flareite.rojo.downloaded"
-title = "Downloaded"
-hidden = true
-
-[[commands]]
-id = "flareite.rojo.timer"
-title = "Timer"
 hidden = true
 
 [configuration.project]
