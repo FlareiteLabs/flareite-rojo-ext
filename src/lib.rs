@@ -1,10 +1,13 @@
 //! Rojo for Flareite: Roblox projects made from files.
 //!
-//! - **Serving.** `rojo serve` runs for one project at a time, from the
-//!   status bar or the Projects view; its output goes to the extension's
-//!   log as it's written (`spawn-streaming`), the port it listens on shows
-//!   in the status bar, and its errors are shown. Before the first serve
-//!   with a version of Rojo, it offers to install Rojo's Studio plugin.
+//! - **Serving.** `rojo serve` runs for any number of the folder's projects
+//!   at once (an experience can be several), each on a port of its own: its
+//!   `servePort`, or the next one up that's free. They're started from the
+//!   status bar or the Projects view; their output goes to the extension's
+//!   log as it's written (`spawn-streaming`), the ports they listen on show
+//!   in the status bar and the view, and their errors are shown. Before the
+//!   first serve with a version of Rojo, it offers to install Rojo's Studio
+//!   plugin.
 //! - **Sourcemaps.** `rojo sourcemap --watch` keeps `sourcemap.json` up to
 //!   date for luau-lsp (the Luau extension). It's read for the Instances
 //!   view, and for explorer marks saying what each file becomes.
@@ -89,12 +92,22 @@ impl Config {
   }
 }
 
-/// The `rojo serve` running.
+/// A `rojo serve` running, one for each project served.
 struct Serve {
   process: u64,
   project: Project,
+  /// The port it was started on.
+  port: u16,
+  /// The port the project asked for, when it's served on another: the
+  /// project's `servePort` (or the setting's, or 34872) was taken.
+  wanted: Option<u16>,
+  /// How many ports were tried after the first, which was in use.
+  tries: u16,
   address: Option<String>,
-  port: Option<String>,
+  /// It said it's listening.
+  listening: bool,
+  /// It couldn't start, as its port is in use: it's started on the next.
+  port_in_use: bool,
   /// The last error it logged, to say why it stopped.
   last_error: Option<String>,
 }
@@ -160,6 +173,7 @@ struct Running {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Action {
   Serve,
+  Stop,
   Build { open: bool },
   Upload,
   Syncback,
@@ -169,6 +183,8 @@ enum Action {
 /// A question asked, and what the answer is for.
 enum Pending {
   Project(Action),
+  /// The status bar's menu: serve or stop each project, or all.
+  ServeMenu,
   BuildOutput {
     project: Project,
     open: bool,
@@ -214,7 +230,10 @@ struct State {
   trusted: bool,
   projects: Vec<Project>,
   watch: Option<u64>,
-  serve: Option<Serve>,
+  /// What's being served, in the order it was started.
+  serves: Vec<Serve>,
+  /// The Studio plugin was offered, this session.
+  plugin_offered: bool,
   sourcemap: Option<SourcemapRun>,
   /// Sourcemap failures are shown once, until it runs again.
   sourcemap_failure_shown: bool,
@@ -320,7 +339,7 @@ fn refresh_folder() {
     if let Some(watch) = with_state(|state| state.watch.take()) {
       workspace::unwatch(watch);
     }
-    stop_serving();
+    stop_all();
     if let Some(path) = &path {
       match workspace::watch(path) {
         Ok(watch) => with_state(|state| state.watch = Some(watch)),
@@ -358,24 +377,32 @@ fn main_project() -> Option<Project> {
   })
 }
 
+/// Where each project is served: its path, and the port once it listens.
+fn served() -> Vec<(String, Option<u16>)> {
+  with_state(|state| {
+    state
+      .serves
+      .iter()
+      .map(|serve| {
+        (
+          serve.project.path.clone(),
+          serve.listening.then_some(serve.port),
+        )
+      })
+      .collect()
+  })
+}
+
 fn show_projects() {
-  let (folder, projects, serving) = with_state(|state| {
-    (
-      state.folder.clone(),
-      state.projects.clone(),
-      state
-        .serve
-        .as_ref()
-        .map(|serve| (serve.project.path.clone(), serve.port.clone())),
-    )
-  });
+  let (folder, projects) = with_state(|state| (state.folder.clone(), state.projects.clone()));
+  let serving = served();
   let items: Vec<views::TreeItem> = projects
     .iter()
     .map(|project| {
       let served = serving
-        .as_ref()
-        .filter(|(path, _)| *path == project.path)
-        .map(|(_, port)| port.clone());
+        .iter()
+        .find(|(path, _)| *path == project.path)
+        .map(|(_, port)| *port);
       let description = match &served {
         Some(Some(port)) => format!("{} · serving on {port}", project.relative),
         Some(None) => format!("{} · starting", project.relative),
@@ -408,6 +435,10 @@ fn show_projects() {
     })
     .collect();
   let _ = views::set_items(PROJECTS_VIEW, &items);
+  let _ = views::set_badge(
+    PROJECTS_VIEW,
+    u32::try_from(serving.len()).unwrap_or(u32::MAX),
+  );
   let welcome = match (&folder, projects.is_empty()) {
     (None, _) => Some(Welcome {
       text: "Open a folder with a Rojo project to serve and build it.".into(),
@@ -426,40 +457,79 @@ fn show_projects() {
   let _ = views::set_welcome(PROJECTS_VIEW, welcome.as_ref());
 }
 
+/// What the status bar item says about what's served: its text and tooltip.
+/// `serves` are each project's name, address, and port (once listening).
+fn status_text(
+  serves: &[(String, Option<String>, Option<u16>)],
+  projects: usize,
+) -> (String, String) {
+  let line = |(name, address, port): &(String, Option<String>, Option<u16>)| match port {
+    Some(port) => format!(
+      "{name}: {}:{port}",
+      address.as_deref().unwrap_or("localhost")
+    ),
+    None => format!("{name}: starting"),
+  };
+  let click = if projects > 1 {
+    "Click to serve or stop projects."
+  } else {
+    "Click to stop."
+  };
+  match serves {
+    [] => (
+      "Rojo".into(),
+      if projects > 1 {
+        "Serve projects to Roblox Studio".into()
+      } else {
+        "Serve the project to Roblox Studio".into()
+      },
+    ),
+    [(name, address, Some(port))] => (
+      format!("Rojo: serving on {port}"),
+      format!(
+        "Serving {name} at {}:{port}: connect from Rojo's plugin in Roblox Studio. {click}",
+        address.as_deref().unwrap_or("localhost")
+      ),
+    ),
+    [(name, _, None)] => (
+      "Rojo: starting…".into(),
+      format!("Starting to serve {name}. {click}"),
+    ),
+    _ => (
+      format!("Rojo: serving {} projects", serves.len()),
+      format!(
+        "Connect from Rojo's plugin in Roblox Studio, to each project's port:\n{}\n{click}",
+        serves.iter().map(line).collect::<Vec<_>>().join("\n")
+      ),
+    ),
+  }
+}
+
 fn show_status() {
-  let (has_projects, serve) = with_state(|state| {
+  let (projects, serves) = with_state(|state| {
     (
-      !state.projects.is_empty(),
-      state.serve.as_ref().map(|serve| {
-        (
-          serve.project.relative.clone(),
-          serve.address.clone(),
-          serve.port.clone(),
-        )
-      }),
+      state.projects.len(),
+      state
+        .serves
+        .iter()
+        .map(|serve| {
+          (
+            serve.project.name.clone(),
+            serve.address.clone(),
+            serve.listening.then_some(serve.port),
+          )
+        })
+        .collect::<Vec<_>>(),
     )
   });
-  let item = match serve {
-    Some((project, address, Some(port))) => Some(StatusItem {
-      text: format!("Rojo: serving on {port}"),
-      tooltip: Some(format!(
-        "Serving {project} at {}:{port}: connect from Rojo's plugin in Roblox Studio. Click to stop.",
-        address.as_deref().unwrap_or("localhost")
-      )),
+  let item = (projects > 0 || !serves.is_empty()).then(|| {
+    let (text, tooltip) = status_text(&serves, projects);
+    StatusItem {
+      text,
+      tooltip: Some(tooltip),
       command: Some("flareite.rojo.toggleServe".into()),
-    }),
-    Some((project, _, None)) => Some(StatusItem {
-      text: "Rojo: starting…".into(),
-      tooltip: Some(format!("Starting to serve {project}. Click to stop.")),
-      command: Some("flareite.rojo.toggleServe".into()),
-    }),
-    None if has_projects => Some(StatusItem {
-      text: "Rojo".into(),
-      tooltip: Some("Serve the project to Roblox Studio".into()),
-      command: Some("flareite.rojo.toggleServe".into()),
-    }),
-    None => None,
-  };
+    }
+  });
   let _ = workbench::set_status_item(STATUS, item.as_ref());
 }
 
@@ -620,8 +690,21 @@ fn sourcemap_failed(message: &str, missing: bool) {
 
 // --- Serving ---------------------------------------------------------------
 
-fn stop_serving() {
-  if let Some(serve) = with_state(|state| state.serve.take()) {
+/// Rojo's port when neither the project nor the settings name one.
+const DEFAULT_PORT: u16 = 34872;
+/// Ports tried after one that's in use, before giving up.
+const PORT_TRIES: u16 = 20;
+
+/// Stops serving a project (by its path), if it's served.
+fn stop_serving(path: &str) {
+  let stopped = with_state(|state| {
+    let index = state
+      .serves
+      .iter()
+      .position(|serve| serve.project.path == path)?;
+    Some(state.serves.remove(index))
+  });
+  if let Some(serve) = stopped {
     processes::kill(serve.process);
     log(
       LogLevel::Info,
@@ -632,26 +715,83 @@ fn stop_serving() {
   show_projects();
 }
 
-fn serve(project: Project) -> Result<(), String> {
-  let folder = trusted_folder()?;
-  stop_serving();
-  let mut args: Vec<String> = ["serve", &project.relative, "--color", "never"]
-    .map(str::to_owned)
-    .to_vec();
-  let port = Config::read().serve_port;
-  if port > 0 {
-    args.push("--port".into());
-    args.push(port.to_string());
+/// Stops serving every project.
+fn stop_all() {
+  for serve in with_state(|state| std::mem::take(&mut state.serves)) {
+    processes::kill(serve.process);
+    log(
+      LogLevel::Info,
+      &format!("stopped serving {}", serve.project.relative),
+    );
   }
+  show_status();
+  show_projects();
+}
+
+/// The port a project asks for: its `servePort`, the Serve Port setting's,
+/// or Rojo's own.
+fn wanted_port(project: &Project) -> u16 {
+  let setting = u16::try_from(Config::read().serve_port)
+    .ok()
+    .filter(|port| *port > 0);
+  project.serve_port.or(setting).unwrap_or(DEFAULT_PORT)
+}
+
+/// `wanted`, or the next port up that isn't `taken` (by the extension's
+/// other serves).
+fn free_port(wanted: u16, taken: &[u16]) -> Option<u16> {
+  (wanted..=u16::MAX).find(|port| !taken.contains(port))
+}
+
+/// Serves a project, beside any others: on the port it asks for, or the next
+/// free one if another project's serve has it.
+fn serve(project: Project) -> Result<(), String> {
+  let served = with_state(|state| {
+    state
+      .serves
+      .iter()
+      .find(|serve| serve.project.path == project.path)
+      .map(|serve| serve.port)
+  });
+  if let Some(port) = served {
+    info(&format!("{} is already served, on {port}.", project.name));
+    return Ok(());
+  }
+  let wanted = wanted_port(&project);
+  start_serve(project, wanted, 0)
+}
+
+/// Starts `rojo serve` for a project on the first port from `from` that the
+/// extension's other serves don't have. `tries` counts ports that were in
+/// use.
+fn start_serve(project: Project, from: u16, tries: u16) -> Result<(), String> {
+  let folder = trusted_folder()?;
+  let wanted = wanted_port(&project);
+  let taken: Vec<u16> = with_state(|state| state.serves.iter().map(|serve| serve.port).collect());
+  let port = free_port(from, &taken).ok_or("No port is free to serve on.")?;
+  let args: Vec<String> = [
+    "serve",
+    &project.relative,
+    "--port",
+    &port.to_string(),
+    "--color",
+    "never",
+  ]
+  .map(str::to_owned)
+  .to_vec();
   match spawn("rojo", &args, &folder) {
     Ok(process) => {
       log(LogLevel::Info, &format!("serving: rojo {}", args.join(" ")));
       with_state(|state| {
-        state.serve = Some(Serve {
+        state.serves.push(Serve {
           process,
           project,
+          port,
+          wanted: (port != wanted).then_some(wanted),
+          tries,
           address: None,
-          port: None,
+          listening: false,
+          port_in_use: false,
           last_error: None,
         });
       });
@@ -665,6 +805,90 @@ fn serve(project: Project) -> Result<(), String> {
     }
     Err(error) => Err(describe("Rojo", &error)),
   }
+}
+
+/// Serves every project not yet served.
+fn serve_all() -> Result<(), String> {
+  let projects = with_state(|state| state.projects.clone());
+  if projects.is_empty() {
+    return Err("This folder has no Rojo project: New Project makes one.".into());
+  }
+  let served: Vec<String> = served().into_iter().map(|(path, _)| path).collect();
+  for project in projects {
+    if !served.contains(&project.path) {
+      serve(project)?;
+    }
+  }
+  Ok(())
+}
+
+/// The status bar's click: with one project, serves or stops it; with
+/// several, offers to serve or stop each, or all.
+fn serve_menu() -> Result<(), String> {
+  let projects = with_state(|state| state.projects.clone());
+  let serving = served();
+  let port_of = |project: &Project| {
+    serving
+      .iter()
+      .find(|(path, _)| *path == project.path)
+      .map(|(_, port)| *port)
+  };
+  if projects.len() <= 1 && serving.len() <= 1 {
+    return match (projects.first(), serving.first()) {
+      (_, Some((path, _))) => {
+        stop_serving(&path.clone());
+        Ok(())
+      }
+      (Some(project), None) => serve(project.clone()),
+      (None, None) => Err("This folder has no Rojo project: New Project makes one.".into()),
+    };
+  }
+  let mut items: Vec<PickItem> = projects
+    .iter()
+    .map(|project| match port_of(project) {
+      Some(port) => PickItem {
+        label: format!("Stop {}", project.name),
+        description: Some(match port {
+          Some(port) => format!("{} · serving on {port}", project.relative),
+          None => format!("{} · starting", project.relative),
+        }),
+        value: format!("stop:{}", project.path),
+      },
+      None => PickItem {
+        label: format!("Serve {}", project.name),
+        description: Some(project.relative.clone()),
+        value: format!("serve:{}", project.path),
+      },
+    })
+    .collect();
+  if serving.len() < projects.len() {
+    items.push(PickItem {
+      label: "Serve All Projects".into(),
+      description: Some("Each on a port of its own".into()),
+      value: "serve-all".into(),
+    });
+  }
+  if !serving.is_empty() {
+    items.push(PickItem {
+      label: "Stop All".into(),
+      description: None,
+      value: "stop-all".into(),
+    });
+  }
+  remember(
+    prompts::pick("Serve or stop which project?", &items),
+    Pending::ServeMenu,
+  );
+  Ok(())
+}
+
+/// Whether a line of `rojo serve` says its port is taken.
+fn says_port_in_use(line: &str) -> bool {
+  let line = line.to_lowercase();
+  line.contains("could not start the rojo server")
+    || line.contains("already in use")
+    || line.contains("address in use")
+    || line.contains("os error 10048")
 }
 
 /// A version's major and minor numbers: "7.4.1" is (7, 4).
@@ -706,38 +930,80 @@ fn offer_plugin(folder: &str) {
   );
 }
 
-/// What a line of `rojo serve` says: where it listens, or an error. Once
-/// it listens, the Studio plugin is offered.
-fn serve_line(text: &str) {
+/// What happened when a serve started listening.
+struct Listening {
+  folder: Option<String>,
+  /// Its project, and the port it asked for, when it's served on another.
+  moved: Option<(String, u16, u16)>,
+  /// The Studio plugin wasn't offered yet this session.
+  offer_plugin: bool,
+}
+
+/// What a line of a `rojo serve` (by its process) says: where it listens,
+/// or an error. Once the first listens, the Studio plugin is offered.
+fn serve_line(process: u64, text: &str) {
   let trimmed = text.trim();
   let (key, value) = trimmed.split_once(':').unwrap_or_default();
   let value = value.trim();
   let error = error_message(text).map(str::to_owned);
-  let (changed, listening) = with_state(|state| {
-    let Some(serve) = &mut state.serve else {
-      return (false, None);
+  let in_use = says_port_in_use(text);
+  let (changed, listening, show_error) = with_state(|state| {
+    let folder = state.folder.clone();
+    let Some(serve) = state
+      .serves
+      .iter_mut()
+      .find(|serve| serve.process == process)
+    else {
+      return (false, None, None);
     };
+    if in_use {
+      // It's started again on the next port when it ends.
+      serve.port_in_use = true;
+    }
     if error.is_some() {
       serve.last_error.clone_from(&error);
     }
+    let show_error = error.clone().filter(|_| !serve.port_in_use);
     match key {
       "Address" if !value.is_empty() => serve.address = Some(value.to_owned()),
-      "Port" if !value.is_empty() && serve.port.is_none() => {
-        serve.port = Some(value.to_owned());
-        return (true, state.folder.clone());
+      "Port" if !value.is_empty() && !serve.listening => {
+        serve.listening = true;
+        let moved = serve
+          .wanted
+          .map(|wanted| (serve.project.name.clone(), wanted, serve.port));
+        let offer = !std::mem::replace(&mut state.plugin_offered, true);
+        return (
+          true,
+          Some(Listening {
+            folder,
+            moved,
+            offer_plugin: offer,
+          }),
+          show_error,
+        );
       }
-      _ => return (false, None),
+      _ => return (false, None, show_error),
     }
-    (true, None)
+    (true, None, show_error)
   });
   if changed {
     show_status();
     show_projects();
   }
-  if let Some(error) = error {
+  if let Some(error) = show_error {
     host::show_message(MessageLevel::Warning, &format!("Rojo: {error}"));
   }
-  if let Some(folder) = listening {
+  let Some(listening) = listening else {
+    return;
+  };
+  if let Some((name, wanted, port)) = listening.moved {
+    info(&format!(
+      "{name} is served on {port}, since {wanted} is taken: connect Rojo's plugin in Studio to {port}."
+    ));
+  }
+  if listening.offer_plugin
+    && let Some(folder) = listening.folder
+  {
     offer_plugin(&folder);
   }
 }
@@ -760,11 +1026,7 @@ fn output(lines: ProcessLines) {
     Gone,
   }
   let whose = with_state(|state| {
-    if state
-      .serve
-      .as_ref()
-      .is_some_and(|serve| serve.process == process)
-    {
+    if state.serves.iter().any(|serve| serve.process == process) {
       Whose::Serve
     } else if state
       .sourcemap
@@ -802,7 +1064,7 @@ fn output(lines: ProcessLines) {
     match whose {
       Whose::Serve => {
         log(level, &format!("serve: {text}"));
-        serve_line(text);
+        serve_line(process, text);
       }
       Whose::Sourcemap => {
         log(level, &format!("sourcemap: {text}"));
@@ -893,19 +1155,33 @@ fn finished(finished: FinishedProcess) {
   let process = finished.process;
   let outcome = finished.outcome;
   let serve = with_state(|state| {
-    if state
-      .serve
-      .as_ref()
-      .is_some_and(|serve| serve.process == process)
-    {
-      state.serve.take()
-    } else {
-      None
-    }
+    let index = state
+      .serves
+      .iter()
+      .position(|serve| serve.process == process)?;
+    Some(state.serves.remove(index))
   });
   if let Some(serve) = serve {
     show_status();
     show_projects();
+    // Its port is taken (by another program): the next one.
+    if serve.port_in_use
+      && !matches!(outcome, Err(ProcessError::Killed))
+      && serve.tries < PORT_TRIES
+      && let Some(next) = serve.port.checked_add(1)
+    {
+      log(
+        LogLevel::Info,
+        &format!(
+          "port {} is in use; serving {} on the next one",
+          serve.port, serve.project.relative
+        ),
+      );
+      if let Err(error) = start_serve(serve.project, next, serve.tries + 1) {
+        warn(&error);
+      }
+      return;
+    }
     if !matches!(outcome, Err(ProcessError::Killed)) {
       if not_installed(&outcome, &[]) {
         offer_install_rojo("Rojo isn't installed.");
@@ -914,9 +1190,9 @@ fn finished(finished: FinishedProcess) {
           .last_error
           .clone()
           .unwrap_or_else(|| why(&[], &outcome));
-        // Its last error was just shown.
+        // Its last error was just shown, unless it was about the port.
         let message = format!("Rojo stopped serving {}: {why}", serve.project.relative);
-        if serve.last_error.is_some() {
+        if serve.last_error.is_some() && !serve.port_in_use {
           log(LogLevel::Warn, &message);
           host::show_message(
             MessageLevel::Warning,
@@ -1162,6 +1438,26 @@ fn answered(answer: PromptAnswer) -> Result<(), String> {
         }
       }
     }
+    Pending::ServeMenu => {
+      let Some(choice) = picked else {
+        return Ok(());
+      };
+      match choice.as_str() {
+        "serve-all" => serve_all()?,
+        "stop-all" => stop_all(),
+        _ => {
+          if let Some(path) = choice.strip_prefix("stop:") {
+            stop_serving(path);
+          } else if let Some(path) = choice.strip_prefix("serve:") {
+            let project =
+              with_state(|state| state.projects.iter().find(|p| p.path == path).cloned());
+            if let Some(project) = project {
+              serve(project)?;
+            }
+          }
+        }
+      }
+    }
     Pending::BuildOutput { project, open } => {
       if let Some(output) = text.filter(|t| !t.is_empty()) {
         build_to(project, output, open)?;
@@ -1347,14 +1643,29 @@ fn with_project(action: Action, argument: Option<String>) -> Result<(), String> 
       None => Err("That project file is gone.".into()),
     };
   }
-  let projects = with_state(|state| state.projects.clone());
+  let mut projects = with_state(|state| state.projects.clone());
+  if projects.is_empty() {
+    return Err("This folder has no Rojo project: New Project makes one.".into());
+  }
+  // Serving offers the projects not served yet; stopping, those served.
+  let served: Vec<String> = served().into_iter().map(|(path, _)| path).collect();
+  match action {
+    Action::Serve => {
+      projects.retain(|project| !served.contains(&project.path));
+      if projects.is_empty() {
+        return Err("Every project is being served.".into());
+      }
+    }
+    Action::Stop => {
+      projects.retain(|project| served.contains(&project.path));
+      if projects.is_empty() {
+        return Err("No project is being served.".into());
+      }
+    }
+    _ => {}
+  }
   match projects.len() {
-    0 => Err("This folder has no Rojo project: New Project makes one.".into()),
     1 => act(action, projects[0].clone()),
-    _ if action == Action::Serve => match main_project() {
-      Some(project) if project.relative == Config::read().project => act(action, project),
-      _ => pick_project(action, &projects),
-    },
     _ => pick_project(action, &projects),
   }
 }
@@ -1362,6 +1673,7 @@ fn with_project(action: Action, argument: Option<String>) -> Result<(), String> 
 fn pick_project(action: Action, projects: &[Project]) -> Result<(), String> {
   let title = match action {
     Action::Serve => "Serve which project?",
+    Action::Stop => "Stop serving which project?",
     Action::Build { .. } => "Build which project?",
     Action::Upload => "Upload which project?",
     Action::Syncback => "Sync back into which project?",
@@ -1382,6 +1694,10 @@ fn pick_project(action: Action, projects: &[Project]) -> Result<(), String> {
 fn act(action: Action, project: Project) -> Result<(), String> {
   match action {
     Action::Serve => serve(project),
+    Action::Stop => {
+      stop_serving(&project.path);
+      Ok(())
+    }
     Action::Build { open } => {
       let output = project_value(&project, "build").unwrap_or_else(|| project.default_output());
       let title = if open {
@@ -1811,7 +2127,7 @@ impl Extension for Rojo {
 
   fn deactivate(&mut self) {
     with_state(|state| {
-      if let Some(serve) = state.serve.take() {
+      for serve in state.serves.drain(..) {
         processes::kill(serve.process);
       }
       if let Some(run) = state.sourcemap.take() {
@@ -1824,13 +2140,11 @@ impl Extension for Rojo {
     let argument = context.argument;
     match command.trim_start_matches("flareite.rojo.") {
       "serve" => with_project(Action::Serve, argument)?,
-      "stop" => stop_serving(),
+      "stop" => with_project(Action::Stop, argument)?,
+      "serveAll" => serve_all()?,
+      "stopAll" => stop_all(),
       "toggleServe" => {
-        if with_state(|state| state.serve.is_some()) {
-          stop_serving();
-        } else {
-          with_project(Action::Serve, argument)?;
-        }
+        serve_menu()?;
       }
       "build" => with_project(Action::Build { open: false }, argument)?,
       "buildAndOpen" => with_project(Action::Build { open: true }, argument)?,
@@ -1950,6 +2264,54 @@ mod tests {
   }
 
   #[test]
+  fn each_serve_gets_a_port_of_its_own() {
+    assert_eq!(free_port(34872, &[]), Some(34872));
+    assert_eq!(free_port(34872, &[34872, 34873]), Some(34874));
+    assert_eq!(free_port(34872, &[34873]), Some(34872));
+    assert_eq!(free_port(u16::MAX, &[u16::MAX]), None);
+  }
+
+  #[test]
+  fn ports_in_use_are_recognized() {
+    assert!(says_port_in_use(
+      "[ERROR rojo] Could not start the Rojo server on 127.0.0.1:34991."
+    ));
+    assert!(says_port_in_use(
+      "0: error creating server listener: Only one usage of each socket address (protocol/network address/port) is normally permitted. (os error 10048)"
+    ));
+    assert!(says_port_in_use("Address already in use (os error 98)"));
+    assert!(!says_port_in_use("Rojo server listening:"));
+  }
+
+  #[test]
+  fn the_status_bar_says_what_is_served() {
+    let lobby = (
+      "Lobby".to_owned(),
+      Some("localhost".to_owned()),
+      Some(34872),
+    );
+    let game = ("Game".to_owned(), None, None);
+    assert_eq!(status_text(&[], 1).0, "Rojo");
+    assert_eq!(
+      status_text(std::slice::from_ref(&lobby), 1).0,
+      "Rojo: serving on 34872"
+    );
+    assert!(
+      status_text(std::slice::from_ref(&lobby), 1)
+        .1
+        .ends_with("Click to stop.")
+    );
+    assert_eq!(status_text(&[game.clone()], 2).0, "Rojo: starting…");
+    let (text, tooltip) = status_text(&[lobby, game], 2);
+    assert_eq!(text, "Rojo: serving 2 projects");
+    assert!(
+      tooltip.contains("Lobby: localhost:34872\nGame: starting"),
+      "{tooltip}"
+    );
+    assert!(tooltip.ends_with("Click to serve or stop projects."));
+  }
+
+  #[test]
   fn color_codes_are_stripped() {
     assert_eq!(
       strip_ansi("\u{1b}[31mERROR\u{1b}[0m Failed to find tool 'wally'"),
@@ -1990,6 +2352,7 @@ mod tests {
       relative: "default.project.json".into(),
       name: "g".into(),
       place: true,
+      serve_port: None,
     };
     let config = Config {
       project: "default.project.json".into(),

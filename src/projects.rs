@@ -15,6 +15,8 @@ pub struct Project {
   pub name: String,
   /// Its tree is a DataModel: it builds a place, not a model.
   pub place: bool,
+  /// Its `servePort`, the port `rojo serve` listens on for it.
+  pub serve_port: Option<u16>,
 }
 
 impl Project {
@@ -44,6 +46,8 @@ impl Project {
 struct ProjectFile {
   name: Option<String>,
   tree: Option<Tree>,
+  #[serde(rename = "servePort")]
+  serve_port: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -110,6 +114,10 @@ pub fn read(folder: &str, relative: &str) -> Option<Project> {
       .and_then(|file| file.name.clone())
       .filter(|name| !name.trim().is_empty())
       .unwrap_or(fallback),
+    serve_port: file
+      .as_ref()
+      .and_then(|file| file.serve_port)
+      .filter(|port| *port > 0),
     place: file
       .and_then(|file| file.tree)
       .and_then(|tree| tree.class_name)
@@ -227,6 +235,7 @@ mod tests {
       relative: "default.project.json".into(),
       name: "My Game: Two".into(),
       place: true,
+      serve_port: None,
     };
     assert_eq!(project.default_output(), "My Game_ Two.rbxl");
     let model = Project {

@@ -32,8 +32,18 @@ version; **Rojo: Install Roblox Studio Plugin** installs it any time.
 Rojo's output is in **View: Output**, under Rojo. Its errors, such as a file it can't read while
 syncing, show as notifications.
 
-With several projects in the folder, the **Project** setting picks the one served from the status
-bar; the Projects view serves any of them.
+**Several projects at once.** An experience made of several Rojo projects (a lobby and a game,
+say) can serve them all together, each on a port of its own. Serve them one by one from the
+Projects view, or all with **Rojo: Serve All Projects** (the ▶ button on the view). With several
+projects in the folder, clicking **Rojo** in the status bar offers to serve or stop each, or all;
+it shows how many are served, and its tooltip lists each one's port. The Projects view's badge
+counts them too.
+
+Each project is served on its own `servePort` if it sets one, otherwise on the **Serve Port**
+setting's port (Rojo's 34872 by default). When that port is already taken, by another project
+being served or by another program, the project is served on the next free port up, and a
+notification says which: connect Studio's Rojo plugin, in that place, to that port. Give each
+project its own `servePort` to keep them on the same ports every time.
 
 ## The Rojo view
 

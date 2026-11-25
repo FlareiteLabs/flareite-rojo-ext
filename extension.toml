@@ -4,7 +4,7 @@
 # API; and Rokit and Wally. See Flareite's docs/extensions.md.
 id = "flareite.rojo"
 name = "Rojo"
-version = "1.0.0"
+version = "1.1.0"
 description = "Roblox projects with Rojo: serve to Studio, build, sourcemaps, the instance tree, checked project files, and Rokit and Wally."
 author = "Flareite"
 icon = "icon.svg"
@@ -126,6 +126,19 @@ command = "flareite.rojo.openProject"
 [[menus]]
 location = "view/title"
 view = "projects"
+command = "flareite.rojo.serveAll"
+inline = true
+icon = "play"
+
+[[menus]]
+location = "view/title"
+view = "projects"
+command = "flareite.rojo.stopAll"
+group = "0_serve"
+
+[[menus]]
+location = "view/title"
+view = "projects"
 command = "flareite.rojo.newProject"
 inline = true
 icon = "add"
@@ -187,6 +200,14 @@ title = "Serve Project"
 [[commands]]
 id = "flareite.rojo.stop"
 title = "Stop Serving"
+
+[[commands]]
+id = "flareite.rojo.serveAll"
+title = "Serve All Projects"
+
+[[commands]]
+id = "flareite.rojo.stopAll"
+title = "Stop Serving All Projects"
 
 [[commands]]
 id = "flareite.rojo.toggleServe"
@@ -260,7 +281,7 @@ hidden = true
 [configuration.project]
 type = "string"
 default = "default.project.json"
-description = "The project file, in the open folder, that sourcemaps are made from and that's served when there are several. Without it, the first project file found is used."
+description = "The project file, in the open folder, that sourcemaps are made from. Without it, the first project file found is used."
 
 [configuration.sourcemap]
 type = "boolean"
@@ -277,7 +298,7 @@ type = "integer"
 default = 0
 minimum = 0
 maximum = 65535
-description = "The port `rojo serve` listens on; 0 for the project's `servePort`, or 34872."
+description = "The port `rojo serve` listens on for projects without a `servePort` (0 for Rojo's, 34872). Projects served at once each get a port of their own: one whose port is taken is served on the next one up."
 
 [configuration.explorer_marks]
 type = "boolean"
